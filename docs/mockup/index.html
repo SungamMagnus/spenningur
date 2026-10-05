@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spenningur Panel</title>
+<link rel="stylesheet" href="ds/styles.css">
+<style>
+  body{margin:0;background:#c9c4b8;padding:20px;box-sizing:border-box;font-family:var(--font-mono)}
+    .k svg{margin:-26px 0}
+  #fit{transform-origin:0 0;width:fit-content;margin:0 auto}
+</style>
+</head>
+<body>
+<div id="fit"><div id="root"></div></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="ds/_ds_bundle.js"></script>
+<script type="text/babel">
+const { useState, useRef, useCallback, useEffect } = React;
+const { Knob, Fader, Latch, Selector, Lamp, Terminal, Wordmark, SegmentMeter, Meter, PanelFrame } = window.SungamDesignSystem_1cd7e7;
+
+const W = 540, H = 670;
+
+/* ── music data (mockup only: just enough to make the readouts honest) ── */
+const NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const SCALES = [
+  ['MAJOR',[0,2,4,5,7,9,11]], ['MINOR',[0,2,3,5,7,8,10]], ['DORIAN',[0,2,3,5,7,9,10]],
+  ['PHRYGIAN',[0,1,3,5,7,8,10]], ['LYDIAN',[0,2,4,6,7,9,11]], ['MIXOLYDIAN',[0,2,4,5,7,9,10]],
+  ['HARM MINOR',[0,2,3,5,7,8,11]], ['MEL MINOR',[0,2,3,5,7,9,11]],
+  ['PENT MAJOR',[0,2,4,7,9]], ['PENT MINOR',[0,3,5,7,10]], ['BLUES',[0,3,5,6,7,10]],
+];
+// chord styles as scale-step stacks; 'o' = one octave up (n steps)
+const STYLES = [
+  ['TRIAD',[0,2,4]], ['7TH',[0,2,4,6]], ['9TH',[0,2,4,6,8]], ['SUS2',[0,1,4]], ['SUS4',[0,3,4]],
+  ['ADD9',[0,2,4,8]], ['POWER',[0,4]], ['QUARTAL',[0,3,6]], ['SHELL',[0,2,6]], ['DRONE',[0,4,'o']],
+];
+const MODES = ['FOLLOW','CADENCE','WANDER'];
+// the "player": a fixed A-minor line, independent of every setting on the panel
+const PLAYED = [9,0,4,2,11,5,4,9];
+
+const circ = (a, b) => Math.abs((((a - b) % 12) + 18) % 12 - 6);
+function nearestDeg(pc, root, scale) {
+  let best = 0, bd = 99;
+  scale.forEach((s, i) => { const d = circ((root + s) % 12, pc); if (d < bd) { bd = d; best = i; } });
+  return best;
+}
+function estimateKey(recent, scale) {
+  let best = 0, bs = -1;
+  for (let r = 0; r < 12; r++) {
+    const set = scale.map((s) => (r + s) % 12);
+    const sc = recent.reduce((a, pc) => a + (set.includes(pc) ? 1 : 0) + (pc === r ? 2 : 0), 0);
+    if (sc > bs) { bs = sc; best = r; }
+  }
+  return best;
+}
+function pickDegree(mode, d, prev, n, tension) {
+  const cands = [d, (d - 2 + n) % n, (d - 4 + n) % n];
+  if (prev == null) return d;
+  if (mode === 0) return cands.reduce((a, c) => (circ(c, prev) < circ(a, prev) ? c : a));
+  if (mode === 1) { const pref = [3, 4, 1, 5]; return cands.find((c) => pref.includes((c - prev + n) % n)) ?? d; }
+  return cands[Math.floor(Math.random() * (tension > 0.5 ? 3 : 2))];
+}
+// stack scale steps, then fit to VOICES: truncate from the top, or double at the octave
+function buildChord(root, scale, degree, stepsDef, voices) {
+  const n = scale.length;
+  const def = stepsDef.map((s) => (s === 'o' ? n : s));
+  const steps = def.slice(0, voices);
+  for (let j = 0; steps.length < voices; j++) steps.push(def[j % def.length] + n * (1 + Math.floor(j / def.length)));
+  const names = steps.map((s) => { const i = degree + s; return NOTES[(root + scale[i % n]) % 12]; });
+  return { names, rootName: NOTES[(root + scale[degree]) % 12] };
+}
+
+/* ── drag wrappers, same gesture as the UI kits ── */
+function useDrag(value, onChange, travel = 100) {
+  const start = useRef(null);
+  return useCallback((e) => {
+    start.current = { y: e.clientY, v: value };
+    const move = (ev) => {
+      const dy = start.current.y - ev.clientY;
+      onChange(Math.max(0, Math.min(1, start.current.v + dy / travel * (ev.shiftKey ? 0.22 : 1))));
+    };
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  }, [value, onChange]);
+}
+// The Knob svg carries 40px of padding per side; negative margin makes the footprint the dial itself.
+function K({ value, onChange, ...rest }) {
+  const onDown = useDrag(value, onChange, rest.radius >= 30 ? 100 : 80);
+  return <div onPointerDown={onDown} className="k" style={{ margin: '0 -30px', touchAction: 'none' }}><Knob value={value} {...rest} /></div>;
+}
+function F({ value, onChange, ...rest }) {
+  const onDown = useDrag(value, onChange, rest.travel || 90);
+  return <div onPointerDown={onDown} style={{ touchAction: 'none' }}><Fader value={value} {...rest} /></div>;
+}
+const lerp = (a, b, n) => a + (b - a) * n;
+const fmtMs = (ms) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
+const lbl = { fontSize: 8, color: 'var(--ink-62)', letterSpacing: '.02em', marginBottom: 4 };
+const box = (color, filled) => ({
+  border: `1px solid ${color}`, background: filled ? color : 'transparent', color: filled ? 'var(--paper)' : color,
+  padding: '4px 8px', fontSize: 9.5, whiteSpace: 'nowrap',
+});
+
+/* Dropdown: not in the design system. Built from its vocabulary: an outlined box carrying the value,
+   a Lamp-style square that is filled while the menu is open, and a menu made of vertical Selectors. */
+function Dropdown({ options, selected, color = 'var(--coral)', width = 92, columns = 1, locked = false, alignRight = false, onChange }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    window.addEventListener('pointerdown', away);
+    return () => window.removeEventListener('pointerdown', away);
+  }, [open]);
+  const per = Math.ceil(options.length / columns);
+  return (
+    <div ref={ref} style={{ position: 'relative', width }}>
+      <div onClick={() => !locked && setOpen(!open)} style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', boxSizing: 'border-box', width,
+        border: `1px solid ${open ? color : 'var(--ink-28)'}`, padding: '4px 8px', fontSize: 9.5, fontWeight: 700,
+        color, cursor: locked ? 'default' : 'pointer', userSelect: 'none', whiteSpace: 'nowrap',
+      }}>
+        <span>{options[selected]}</span>
+        <Lamp on={open} color={color} size={6} />
+      </div>
+      {open && (
+        <div style={{ position: 'absolute', top: '100%', [alignRight ? 'right' : 'left']: 0, marginTop: 3, zIndex: 40, display: 'flex', alignItems: 'flex-start',
+                      background: 'var(--paper)', border: `1px solid ${color}`, whiteSpace: 'nowrap' }}>
+          {Array.from({ length: columns }).map((_, c) => (
+            <Selector key={c} vertical color={color} size={9} options={options.slice(c * per, (c + 1) * per)}
+                      selected={selected - c * per}
+                      onChange={(i) => { onChange(c * per + i); setOpen(false); }} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Envelope readout: a drawn trace in a hairline box, like the value boxes. */
+function EnvPlot({ a, d, s, r, w = 188, h = 46, color = 'var(--teal)' }) {
+  const ta = Math.sqrt(a) * 40 + 4, td = Math.sqrt(d) * 40 + 4, th = 40, tr = Math.sqrt(r) * 50 + 4;
+  const tot = ta + td + th + tr, k = (w - 20) / tot;
+  const y0 = h - 8, y1 = 8, ys = y1 + (y0 - y1) * (1 - s);
+  let x = 10;
+  const pts = [[x, y0]]; x += ta * k; pts.push([x, y1]); x += td * k; pts.push([x, ys]); x += th * k; pts.push([x, ys]); x += tr * k; pts.push([x, y0]);
+  const kind = s < 0.15 && r < 0.4 ? 'TRANSIENT' : a > 0.35 && s > 0.5 ? 'PAD' : 'BLOOM';
+  return (
+    <svg width={w} height={h} style={{ display: 'block' }}>
+      <rect x={0.5} y={0.5} width={w - 1} height={h - 1} fill="var(--paper)" stroke="var(--teal)" strokeOpacity={0.6} />
+      <line x1={10} y1={y0} x2={w - 10} y2={y0} stroke="var(--ink-13)" />
+      <polyline points={pts.map((p) => p.join(',')).join(' ')} fill="none" stroke={color} strokeWidth={1.6} />
+      <text x={w - 6} y={12} textAnchor="end" fontSize={8} fill="var(--teal)" fontFamily="var(--font-mono)">{kind}</text>
+    </svg>
+  );
+}
+
+function Frame({ title, color, x, y, w, h, children, pad = 16 }) {
+  return (
+    <div style={{ position: 'absolute', left: x, top: y, width: w, height: h, background: 'var(--paper)' }}>
+      <PanelFrame title={title} color={color} width={w} height={h}>
+        <div style={{ padding: `${pad + 6}px ${pad}px ${pad}px` }}>{children}</div>
+      </PanelFrame>
+    </div>
+  );
+}
+
+function SpenningurPanel() {
+  const [k, setK] = useState({
+    inGain: 0.5, gate: 0.3, tension: 0.35, hold: 0.25,
+    ring: 0.55, damp: 0.5, spread: 0.4, glide: 0.2,
+    atk: 0.12, dec: 0.45, sus: 0.6, rel: 0.5, mix: 0.6,
+  });
+  const set = (id) => (v) => setK((s) => ({ ...s, [id]: v }));
+  const [rootPc, setRootPc] = useState(9);
+  const [track, setTrack] = useState(false);
+  const [trackMode, setTrackMode] = useState(1);
+  const [scaleI, setScaleI] = useState(1);
+  const [styleI, setStyleI] = useState(1);
+  const [random, setRandom] = useState(true);
+  const [voices, setVoices] = useState(3);
+  const [mode, setMode] = useState(1);
+  const [range, setRange] = useState(1);
+  const [lim, setLim] = useState(true);
+  const [demo, setDemo] = useState(true);
+  const [step, setStep] = useState(0);
+  const [hist, setHist] = useState([]);
+  const [eff, setEff] = useState({ root: 9, pc: 9, st: 1 });
+  const recent = useRef([]);
+  const lastStep = useRef(-1);
+
+  const scale = SCALES[scaleI][1];
+  const n = scale.length;
+
+  useEffect(() => {
+    if (!demo) return;
+    const id = setInterval(() => setStep((s) => s + 1), 1400);
+    return () => clearInterval(id);
+  }, [demo]);
+
+  // each demo note: track the root, pick the chord root, draw a style, push to history
+  useEffect(() => {
+    const pc = PLAYED[step % PLAYED.length];
+    if (lastStep.current !== step) { recent.current = [...recent.current, pc].slice(-8); lastStep.current = step; }
+    const root = !track ? rootPc : trackMode === 0 ? pc : estimateKey(recent.current, scale);
+    const d = nearestDeg(pc, root, scale);
+    const prev = hist.length ? hist[hist.length - 1].deg : null;
+    const deg = track && trackMode === 0 ? 0 : pickDegree(mode, d, prev, n, k.tension);
+    const st = random ? Math.floor(Math.random() * STYLES.length) : styleI;
+    const chord = buildChord(root, scale, deg, STYLES[st][1], voices + 2);
+    setEff({ root, pc, st });
+    setHist((h) => [...h, { deg, st, ...chord }].slice(-4));
+  }, [step, rootPc, scaleI, styleI, random, mode, track, trackMode, voices]);
+
+  const cur = hist[hist.length - 1];
+  const shownStyle = random ? eff.st : styleI;
+  const styleColor = random ? 'var(--violet)' : 'var(--coral)';
+  const rootColor = track ? 'var(--violet)' : 'var(--coral)';
+  const modeBypassed = track && trackMode === 0;
+
+  // vertical stack: x/width shared, y = running total, 12px between sections
+  const X = 20, FW = W - 40, GAP = 12;
+  const yTop = 24, hTop = 172, inW = 168, haX = X + inW + GAP, haW = FW - inW - GAP;   // INPUT and HARMONY share one row
+  const yPr = yTop + hTop + GAP, hPr = 158;
+  const yRe = yPr + hPr + GAP, hRe = 248;
+  const outW = 112, resW = FW - outW - GAP, outX = X + resW + GAP;
+
+  return (
+    <div style={{ position: 'relative', width: W, height: H, background: 'var(--paper)', border: '1px solid var(--ink-22)', boxSizing: 'border-box' }}>
+      {/* ── INPUT and HARMONY: one row, both narrow ─────────── */}
+      <Frame title="INPUT" color="var(--coral)" x={X} y={yTop} w={inW} h={hTop}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <K value={k.inGain} onChange={set('inGain')} radius={15} color="var(--coral)" label="IN" valueText={`${lerp(-12, 12, k.inGain).toFixed(1)} dB`} />
+          <K value={k.gate} onChange={set('gate')} radius={15} color="var(--lilac)" label="GATE" valueText={`${Math.round(lerp(-72, -24, k.gate))} dB`} />
+          <div style={{ marginLeft: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, paddingTop: 12 }}>
+            <Lamp on color="var(--coral)" />
+            <SegmentMeter level={0.55} color="var(--coral)" segments={6} />
+          </div>
+        </div>
+        <div style={{ position: 'absolute', left: 16, right: 16, bottom: 16 }}>
+          <div style={lbl}>RANGE</div>
+          <Selector options={['SMALL', 'MEDIUM', 'LARGE']} selected={range} color="var(--coral)" onChange={setRange} size={8.5} />
+        </div>
+      </Frame>
+
+      <Frame title="HARMONY" color="var(--coral)" x={haX} y={yTop} w={haW} h={hTop}>
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+          <div>
+            <div style={lbl}>ROOT</div>
+            <Dropdown options={NOTES} selected={track ? eff.root : rootPc} color={rootColor} width={56} columns={3} locked={track} onChange={setRootPc} />
+          </div>
+          <Latch on={track} label="TRACK" color="var(--violet)" width={48} onClick={() => setTrack(!track)} />
+          <div>
+            <div style={lbl}>FOLLOWS</div>
+            <Selector options={['NOTE', 'KEY']} selected={trackMode} color="var(--violet)" onChange={setTrackMode} size={8.5} />
+          </div>
+          <div>
+            <div style={lbl}>SCALE</div>
+            <Dropdown options={SCALES.map((s) => s[0])} selected={scaleI} color="var(--coral)" width={96} columns={3} alignRight onChange={setScaleI} />
+          </div>
+        </div>
+        <div style={{ height: 1, background: 'var(--ink-13)', margin: '24px 0' }} />
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+          <div>
+            <div style={lbl}>CHORD</div>
+            <Dropdown options={STYLES.map((s) => s[0])} selected={shownStyle} color={styleColor} width={84} columns={2} onChange={setStyleI} />
+          </div>
+          <Latch on={random} label="RANDOM" color="var(--violet)" width={56} onClick={() => setRandom(!random)} />
+          <div style={{ paddingBottom: 5 }}><Lamp on={random} color="var(--violet)" /></div>
+          <div>
+            <div style={lbl}>VOICES</div>
+            <Selector options={['2', '3', '4', '5', '6']} selected={voices} color="var(--coral)" onChange={setVoices} size={8.5} />
+          </div>
+        </div>
+      </Frame>
+
+      {/* ── PROGRESSION ──────────────────────────────────────── */}
+      <Frame title="PROGRESSION" color="var(--coral)" x={X} y={yPr} w={FW} h={hPr}>
+        <div style={{ display: 'flex', gap: 18 }}>
+          <div style={{ display: 'flex', gap: 18, alignItems: 'flex-start', opacity: modeBypassed ? 0.38 : 1 }}>
+            <div>
+              <div style={lbl}>MODE</div>
+              <Selector options={MODES} selected={mode} color="var(--coral)" vertical onChange={setMode} size={8.5} />
+            </div>
+            <K value={k.tension} onChange={set('tension')} radius={26} color="var(--coral)" label="TENSION" valueText={`${Math.round(k.tension * 100)}%`} />
+            <K value={k.hold} onChange={set('hold')} radius={15} color="var(--lilac)" label="HOLD" valueText={`${Math.round(lerp(50, 1000, k.hold))} ms`} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <div><div style={lbl}>DETECTED</div><div style={box('var(--coral)')}>{NOTES[eff.pc]}3 &nbsp;+4 ct</div></div>
+              <div style={{ flex: 1 }}><div style={lbl}>ROOT</div><div style={box(rootColor)}>{NOTES[eff.root]} {SCALES[scaleI][0]}</div></div>
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <div><div style={lbl}>CHORD</div>
+                <div style={box('var(--coral)')}>{cur ? `${cur.rootName} ${STYLES[cur.st][0]}` : '-'}</div></div>
+              <div style={{ flex: 1 }}><div style={lbl}>TONES</div>
+                <div style={box('var(--coral)')}>{cur ? cur.names.join(' ') : '-'}</div></div>
+            </div>
+            <div>
+              <div style={lbl}>HISTORY</div>
+              <div style={{ display: 'flex', gap: 3 }}>
+                {[0, 1, 2, 3].map((i) => {
+                  const c = hist[hist.length - 4 + i];
+                  return <div key={i} style={{ ...box('var(--coral)', c && i === 3), flex: 1, textAlign: 'center', fontSize: 7, padding: '4px 0', opacity: c ? 1 : 0.35 }}>{c ? `${c.rootName} ${STYLES[c.st][0]}` : '-'}</div>;
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      </Frame>
+
+      {/* ── RESONATOR + OUTPUT ───────────────────────────────── */}
+      <Frame title="RESONATOR" color="var(--teal)" x={X} y={yRe} w={resW} h={hRe}>
+        <div style={{ display: 'grid', gridTemplateColumns: '76px 76px', columnGap: 4, rowGap: 6, justifyItems: 'center', alignItems: 'start', width: 156 }}>
+          <K value={k.ring} onChange={set('ring')} radius={26} color="var(--teal)" label="RING" valueText={`${lerp(0.2, 8, k.ring).toFixed(1)} s`} />
+          <K value={k.damp} onChange={set('damp')} radius={20} color="var(--teal)" label="DAMP" valueText={`${lerp(1, 12, k.damp).toFixed(1)} kHz`} />
+          <K value={k.spread} onChange={set('spread')} radius={20} color="var(--teal)" label="SPREAD" valueText={`${lerp(0, 3, k.spread).toFixed(1)} oct`} />
+          <K value={k.glide} onChange={set('glide')} radius={15} color="var(--lilac)" label="GLIDE" valueText={`${Math.round(k.glide * 200)} ms`} />
+        </div>
+        <div style={{ position: 'absolute', right: 16, top: 22 }}>
+          <EnvPlot a={k.atk} d={k.dec} s={k.sus} r={k.rel} w={182} />
+          <div style={{ display: 'flex', gap: 2, marginTop: 2 }}>
+            <F value={k.atk} onChange={set('atk')} travel={72} color="var(--teal)" label="ATTACK" valueText={fmtMs(1 + k.atk * k.atk * 1999)} />
+            <F value={k.dec} onChange={set('dec')} travel={72} color="var(--teal)" label="DECAY" valueText={fmtMs(10 + k.dec * k.dec * 1990)} />
+            <F value={k.sus} onChange={set('sus')} travel={72} color="var(--teal)" label="SUSTAIN" valueText={`${Math.round(k.sus * 100)}%`} />
+            <F value={k.rel} onChange={set('rel')} travel={72} color="var(--teal)" label="RELEASE" valueText={fmtMs(20 + k.rel * k.rel * 7980)} />
+          </div>
+        </div>
+      </Frame>
+
+      <Frame title="OUTPUT" color="var(--steel)" x={outX} y={yRe} w={outW} h={hRe}>
+        <div style={{ display: 'flex', justifyContent: 'center', marginTop: 4 }}>
+          <K value={k.mix} onChange={set('mix')} radius={26} color="var(--steel)" label="MIX" valueText={`${Math.round(k.mix * 100)}% wet`} />
+        </div>
+        <div style={{ position: 'absolute', left: 16, right: 16, bottom: 16 }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 10 }}>
+            <Latch on={lim} label="LIM" color="var(--amber)" width={44} onClick={() => setLim(!lim)} />
+            <Lamp on={lim} color="var(--amber)" />
+          </div>
+          <div style={lbl}>LEVEL</div>
+          <Meter value={0.55} color="var(--steel)" width={outW - 32} />
+        </div>
+      </Frame>
+
+      <div style={{ position: 'absolute', left: X, bottom: 12 }}><Wordmark size={16}>SPENNINGUR</Wordmark></div>
+      <div style={{ position: 'absolute', left: X + 168, bottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Latch on={demo} label="DEMO" color="var(--ink-62)" width={40} onClick={() => setDemo(!demo)} />
+        <span style={{ fontSize: 7.5, color: 'var(--ink-45)', lineHeight: 1.3 }}>MOCKUP. A SCRIPTED A-MINOR<br />LINE STANDS IN FOR THE INPUT.</span>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  useEffect(() => {
+    const fit = () => {
+      const s = Math.min(1, (window.innerWidth - 40) / W, (window.innerHeight - 40) / H);
+      const el = document.getElementById('fit');
+      el.style.transform = `scale(${s})`;
+      el.style.height = H * s + 'px';
+      el.style.width = W * s + 'px';
+    };
+    fit(); window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  }, []);
+  return <SpenningurPanel />;
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body></html>
